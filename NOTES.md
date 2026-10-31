@@ -2,6 +2,41 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> 2026-11-01: HakiOS (oosexgang) builds and boots here; the base is being evaluated <<<
+
+`github.com/oosexgang` (HakiOS) is the **same codebase we forked** (furangelz's hackios, renamed and
+restructured: `drivers/<subsystem>/hakios.*.c`, `MiniIOSurface`, the same msm-DRM-style GPU user client,
+the same `tools/mesa/air` front end, the same loader), ~4 weeks ahead. It has a full Metal driver
+(`hakios-metal`: render/compute/blit, blend, MRT, depth, textures/samplers, CoreAnimation's own shaders),
+120 Hz, `/private/var` as **HFS+ on flash**, and its own U-Boot with a dual-boot menu. Only redwood
+(POCO X5 Pro, SC7280) and QEMU are supported; SM8350 is not a SoC it knows.
+
+**Verified in the WSL lab (`LemonadepLab`) on 2026-11-01, no phone needed:**
+- `/root/hakios` = `hakios-xnu-kernel` main at `a48d2b29`. `make kernel JOBS=8` -> `hakios-kernel`
+  15,772,624 bytes in ~3 min (the kext symbol-set errors are the expected ones, see
+  `tools/make-kernel.sh`). Log: `/root/hakios-kernel-build.log`.
+- `make qemu-open SECS=60` -> `hakios-kernel: version 2.1.13-hakios-darwin22.5-ga48d2b29`,
+  25 drivers built in, `Hello from user space on Darwin!`. Log: `/root/hakios-qemu-open.log`.
+  The panic after initproc exits is the open configuration's normal end.
+- The lab's `/root/hakios` from the 29 Oct evaluation (furangelz UEFI build + a downloaded IPSW) was
+  removed and re-cloned; the extracted IPSW is intact at `~/fkernel/ios165` (2.6 GB), the raw IPSW
+  must be re-downloaded if ever needed.
+
+**The two paths, not yet chosen (user to decide):**
+- **A (recommended, weeks):** rebase lemonadep onto HakiOS -- a new `sm8350` SoC layer and a `lemonadep`
+  device repo (`tools/hakios-device.py new`), then the drivers in their order (CPUFREQ/THERMAL/SOCINFO ->
+  buttons/touch -> UFS -> ADRENO -> ADSP/battery/audio -> WIFI -> rest), reusing `lemonadep/HWMAP_lemonadep.md`
+  and our QCA6490/ath11k work. Inherits Metal, 120 Hz, HFS+ `/var`, U-Boot dual boot.
+- **B (days):** keep the current furangelz-based tree and bring `hakios-metal` in. Our kernel already
+  speaks the interface it needs (`RedwoodGPU.cpp`: `kMsmGemNew`..`kRedwoodSurface 0x7e`, IOSurface-backed
+  buffers); keeps the RAM var store and 60 Hz.
+
+**Device state (2026-10-31):** phone booted into the standalone iOS image, battery drained to ~1 %,
+charging only ~+70 mA net with the screen on (DSP battery manager, 500 mA input on a PC port), pack is
+worn (gauge: 1619 of 2220 mAh) so it shuts off abruptly at low %. `charge_ma=N` is for a plain 5 V
+charger only -- on the OnePlus Warp charger it made charging worse. Screen off is when the charging
+wins (`redwood_cpufreq.c` screen-off slowdown). No device work until it holds a charge.
+
 ### >>> lemonadep 2026-10-29: GPU-accelerated iOS boots on the OnePlus 9 Pro <<<
 
 Via the HackiOS UEFI chain (Mesa/freedreno on the Adreno 660): blur, transparency, smooth UI,
