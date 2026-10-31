@@ -49,6 +49,8 @@ both worked around in the lab and both now reproducible from the repo:
    clang 18 rejects in a constant expression. Replaced with
    `__builtin_bit_cast(uint32_t, f) & 0x80000000u`; verified as constexpr under C++17 and C++20 and
    `-0.0f` still round-trips to `0x80000000`. (Upstream may want this too -- it is a portability bug.)
+   This and the `RedwoodGPU` rename below are `lemonadep/tools/hakios-metal-compat.py <checkout>`
+   (idempotent; reproduces the lab's two files byte for byte).
 2. **The real one:** `hakios-metal` HEAD's `compiler.cpp` is written against **vcvkk's AIR front end**,
    which is not published. The front end in `hakios/tools/mesa/air` is older (no `null_texture`,
    `argbuf_offset`, `supplied`, ...), and the one our `xnu-deps` carries (furangelz's) is a third
