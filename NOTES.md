@@ -38,6 +38,51 @@ the same `tools/mesa/air` front end, the same loader), ~4 weeks ahead. It has a 
   `~/fkernel/xnu-deps/build/mesa` build has a generated-header mismatch (`PIPE_FORMAT_ABGR8888_UNORM`
   undeclared), so the fixture path needs its own Mesa host build -- an environment task, not a design one.
 
+### >>> 2026-11-01 (late): path B started -- `hakios-metal` builds for iOS 16.5 here <<<
+
+`/root/hakios-metal` at `a097abd` now builds for the phone: `make ios MESA=1 HAKIOS=/root/fkernel`
+-> `out/ios/libhakios-metal.a` **960,384 bytes** and `out/ios/hakios-metal-probe`
+**9,484,680 bytes**, with the shader compiler (Mesa's AIR front end + ir3) linked in. Two obstacles,
+both worked around in the lab and both now reproducible from the repo:
+
+1. `include/hakios-metal/a6xx.hpp`'s `constexpr fui()` used `__builtin_signbit`, which the lab's
+   clang 18 rejects in a constant expression. Replaced with
+   `__builtin_bit_cast(uint32_t, f) & 0x80000000u`; verified as constexpr under C++17 and C++20 and
+   `-0.0f` still round-trips to `0x80000000`. (Upstream may want this too -- it is a portability bug.)
+2. **The real one:** `hakios-metal` HEAD's `compiler.cpp` is written against **vcvkk's AIR front end**,
+   which is not published. The front end in `hakios/tools/mesa/air` is older (no `null_texture`,
+   `argbuf_offset`, `supplied`, ...), and the one our `xnu-deps` carries (furangelz's) is a third
+   variant -- richer in other ways (raster-order groups, decoded samplers, vertex attributes,
+   framebuffer-fetch targets), missing exactly seven fields. They were added to `nir_air.h` as
+   always-zero and `libair.a` rebuilt: `lemonadep/tools/air-compat.py` (idempotent; the script's
+   output was compared field-for-field with the header that built the archive). What that costs
+   until the front end grows them: argument-buffer members bind at offset 0, Metal's null texture
+   reads whatever the application bound, `[[threadgroup]]` arguments and interface-only linking are
+   not served, and a function constant supplied as 0 is indistinguishable from one not supplied.
+3. `make ios` also wants the **host** `ir3_compiler` (the checked-in fixtures look stale after a
+   fresh checkout) and `tools/kernels.mk` defaults to vcvk's machine. The fixtures are current, so
+   `make ios ... $(for f in tests/fixtures/*.hpp; do echo -o $f; done)` skips that. A host Mesa
+   build is still needed for `make test MESA=1` (the fixture/compiler comparison).
+
+Also verified offline:
+- Host tests against the fake GPU: `make test CXX=clang++` -> **253 tests, 0 failed checks**.
+- The kernel interface needed one change: `src/iokit_transport.cpp` now matches **`RedwoodGPU`**
+  instead of `HakiosGPU`; the request numbers and structs were already identical.
+- The Metal plug-in links as `HakiosMetal.bundle` (8,263,952 bytes) with the Mesa archives and
+  `plugin/hakios_metallib.c`; hakios's own `build.sh` does not link those, so their shipping bundle
+  is presumably built without `MESA=1`.
+- Userland integration is scripted: `lemonadep/tools/userland-hakios-metal.py <tree>` patches
+  `userland/build.sh` (build, install, `HakiosMetal.clients` = `metal_test` + `hakios-metal-probe`,
+  symlink into `/System/Library/Extensions`, probe into `/redwood/bin`) and writes
+  `src/hakios_metal_plugin.plist` + `rc.jobs.hakiosmetal`. Applied in the lab; `bash -n` clean;
+  idempotent; tested on a synthetic tree.
+
+**Not done:** no image has been built with this yet (the `/System/Library/Extensions` symlink needs
+the 2.5 GB system.apfs rebuild) and nothing has booted (phone still flat). One risk to check first:
+hakios's note that QuartzCore's `default.metallib` is absent from their image -- if ours is the same,
+backboardd cannot run on Metal and the first boots are `metal_test` + the probe only (boot-args
+`gpu=1 metal=1 gpu_recover=1`, `RC_JOBS=rc.jobs.hakiosmetal`).
+
 **Device state (2026-10-31):** phone booted into the standalone iOS image, battery drained to ~1 %,
 charging only ~+70 mA net with the screen on (DSP battery manager, 500 mA input on a PC port), pack is
 worn (gauge: 1619 of 2220 mAh) so it shuts off abruptly at low %. `charge_ma=N` is for a plain 5 V
