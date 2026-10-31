@@ -140,7 +140,14 @@ PROBE_BLOCK = PROBE_ANCHOR + """\t# the driver's own probe (hakios-metal): what 
 """
 
 SYMLINK_ANCHOR = "\tln -s /redwood/lib/RedwoodMetal.bundle sysroot/System/Library/Extensions/RedwoodMetal.bundle\n"
-SYMLINK_BLOCK = SYMLINK_ANCHOR + "\tln -s /redwood/lib/HakiosMetal.bundle sysroot/System/Library/Extensions/HakiosMetal.bundle\n"
+SYMLINK_BLOCK = SYMLINK_ANCHOR + """\tln -s /redwood/lib/HakiosMetal.bundle sysroot/System/Library/Extensions/HakiosMetal.bundle
+\t# The clients list is looked for beside the bundle *as it was loaded* (dladdr on the
+\t# plug-in's own address, plugin/HakiosMetal.m listedBesideTheBundle): Metal composes
+\t# /System/Library/Extensions/<name>.bundle and NSBundle loads the executable by that
+\t# path, so the symlink's target directory is not where it looks. Both copies, because
+\t# which path dyld records is not something to bet the first boot on.
+\tprintf 'metal_test\\nhakios-metal-probe\\n' > sysroot/System/Library/Extensions/HakiosMetal.clients
+"""
 
 
 def main(argv):
