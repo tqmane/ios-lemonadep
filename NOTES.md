@@ -22,14 +22,21 @@ the same `tools/mesa/air` front end, the same loader), ~4 weeks ahead. It has a 
   removed and re-cloned; the extracted IPSW is intact at `~/fkernel/ios165` (2.6 GB), the raw IPSW
   must be re-downloaded if ever needed.
 
-**The two paths, not yet chosen (user to decide):**
-- **A (recommended, weeks):** rebase lemonadep onto HakiOS -- a new `sm8350` SoC layer and a `lemonadep`
-  device repo (`tools/hakios-device.py new`), then the drivers in their order (CPUFREQ/THERMAL/SOCINFO ->
-  buttons/touch -> UFS -> ADRENO -> ADSP/battery/audio -> WIFI -> rest), reusing `lemonadep/HWMAP_lemonadep.md`
-  and our QCA6490/ath11k work. Inherits Metal, 120 Hz, HFS+ `/var`, U-Boot dual boot.
-- **B (days):** keep the current furangelz-based tree and bring `hakios-metal` in. Our kernel already
-  speaks the interface it needs (`RedwoodGPU.cpp`: `kMsmGemNew`..`kRedwoodSurface 0x7e`, IOSurface-backed
-  buffers); keeps the RAM var store and 60 Hz.
+**The two paths (evidence gathered 2026-11-01):**
+- **A (weeks):** rebase lemonadep onto HakiOS -- a new `sm8350` SoC layer and a `lemonadep` device repo
+  (`tools/hakios-device.py new`), then the drivers in their order (CPUFREQ/THERMAL/SOCINFO -> buttons/touch ->
+  UFS -> ADRENO -> ADSP/battery/audio -> WIFI -> rest), reusing `lemonadep/HWMAP_lemonadep.md` and our
+  QCA6490/ath11k work. Inherits Metal, 120 Hz, HFS+ `/var`, U-Boot dual boot -- but loses our standalone
+  boot, Wi-Fi fixes and var store until each is re-ported, and the phone cannot be tested meanwhile.
+- **B (days, now the recommendation):** keep the current tree and bring `hakios-metal` in. **Verified: the
+  kernel interface is identical** -- `RedwoodGPU.cpp` and `drivers/gpu/hakios.gpu.cpp` use the same request
+  numbers (`0x40`-`0x4c`, surface `0x7e`, show `0x7f`; ours also has `kRedwoodGPUWorked 0x7d`), the same
+  `surface` request struct field for field, and the same Mesa DRM shim (`tools/mesa/redwood-drm` vs
+  `hakios-drm`). So the kernel side needs no work; what remains is building `hakios-metal` + its Metal
+  plug-in (`userland/src/HakiosMetal.m`) for iOS 16.5 against our Mesa/air, and the boot-arg to name it.
+  `make test` in `/root/hakios-metal` needs a host Mesa with their `ir3-dump.patch`; the lab's
+  `~/fkernel/xnu-deps/build/mesa` build has a generated-header mismatch (`PIPE_FORMAT_ABGR8888_UNORM`
+  undeclared), so the fixture path needs its own Mesa host build -- an environment task, not a design one.
 
 **Device state (2026-10-31):** phone booted into the standalone iOS image, battery drained to ~1 %,
 charging only ~+70 mA net with the screen on (DSP battery manager, 500 mA input on a PC port), pack is
