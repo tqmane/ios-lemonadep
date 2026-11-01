@@ -140,6 +140,70 @@ worn (gauge: 1619 of 2220 mAh) so it shuts off abruptly at low %. `charge_ma=N` 
 charger only -- on the OnePlus Warp charger it made charging worse. Screen off is when the charging
 wins (`redwood_cpufreq.c` screen-off slowdown). No device work until it holds a charge.
 
+### >>> 2026-11-01 (night): charge in TWRP, then boot; the FD comes back out of the Oct 30 image <<<
+
+**Charging without power cycling: TWRP, not Evolution X.** Evolution X 11.11 (Android 16) does publish
+`boot.img` and `vendor_boot.img` for lemonadep (both 201,326,592 bytes, on `cdn.evolution-x.org`, now in
+`D:\ios port\evo-recovery\` -- keep them out of git), but neither is a standalone recovery: `boot.img`'s
+ramdisk is 1,517,202 bytes of generic GKI (13 entries, `init` only, no recovery UI, no `charger`), and the
+recovery bits (`first_stage_ramdisk/`, `system/bin/charger`, `lib/modules`) are in `vendor_boot.img`,
+which is LZ4-compressed (`02 21 4c 18`) and cannot be `fastboot boot`-ed. `D:\ios port\twrp-3.7.1_12-0-lemonadep.img`
+(201,326,592 bytes, ANDROID! v3, name field `twrp`, 3,857 ramdisk entries) is self-contained: it carries
+`init.recovery.hlthchrg.rc` and `system/bin/charger`, so it charges and shows the percentage.
+`fastboot boot "D:\ios port\twrp-3.7.1_12-0-lemonadep.img"` -- `fastboot boot` writes nothing to flash.
+**Do not format or wipe anything in it:** `userdata` holds the iOS APFS container.
+
+**The boot image's FD was recovered, not rebuilt.** The profile pointed at
+`/root/hakios/fz/Mu-Silicium/...`, which went away with the 29 Oct re-clone of hakios, and the FD left in
+`/root/Mu-Silicium/Build/lemonadepPkg/RELEASE_CLANGPDB/FV/` is a **0x9BE00000** build: 52 bytes different
+from the one the phone ran, and it would not run where the shim puts the FV. `mkxnuimg.py` uses `UEFI_FD`
+verbatim when it is set, so the stale path was a hard failure, not a fallback.
+`lemonadep/tools/extract-uefi-fd.py OUT/lemonadep-boot.img /root/lemonadep-uefi/SILICIUM_UEFI.fd 0x9FD00000`
+takes the FD back out of the image that reached the screen: the image is `gzip(BootShim.bin [176] +
+FD [0x200000] + payload) + dtb`, so the FV sits at payload+0xb0 and its header (`_FVH` at 0x28, `FvLength`
+at 0x20) gives the length. It decompresses with `zlib.decompressobj(31)`, **not** `gzip.decompress`: the
+dtb follows the member uncompressed and gzip reads that as a broken second member. The FV header has **no
+load address** (`0x30` is `Attributes`), so the base is an optional argument the script asserts instead --
+`0x9FD00000` is in the image twice, at 0x168 and 0xb060. Profile now says
+`UEFI_FD=/root/lemonadep-uefi/SILICIUM_UEFI.fd` and `DTB=/root/Mu-Silicium/Resources/DTBs/lemonadep.dtb`
+(byte-identical to the dtb in the Oct 30 image). `Mu-Silicium/build_uefi.py` still cannot run here
+(`ModuleNotFoundError: coloredlogs`), which is one more reason not to rebuild the FD.
+
+`SKIP="kernel loader images" common/build.sh lemonadep` rebuilt `out/lemonadep-boot.img`: same 2,654,208
+bytes, and it differs from the Oct 30 image in **3 bytes only** -- `loader.efi`'s PE `TimeDateStamp` at
+loader+0x88. The shim, the whole FD region and the rest of the payload are byte-identical. The boot image
+carries **no** images: `xl ramdisk` uploads `userland/system.apfs` and `xl run` sends
+`userland/root.apfs` with the kernel over USB, so the new `root.apfs` (00:36, `rc.jobs.hakiosmetal`) and
+`system.apfs` (00:42, with `/System/Library/Extensions`) need no new boot image -- the Oct 30 one still
+boots them.
+
+**TWRP is in `boot_b` now (02:07), so the phone charges without a computer.** Getting into fastboot on
+this device is the hard part and the reason is specific: with VBUS present at power-on ABL takes the
+charger path and boots (the image in `boot_b` has a 5-byte `dummy` ramdisk, so there is no off-mode
+charger and it falls through to iOS). The fastboot screen's "plug in" prompt is ABL *waiting for a USB
+connection event*, and the combo does nothing while the cable is already live. What works: cable in the
+phone, PC end unplugged, hold **Volume Up + Volume Down + Power** (LineageOS lists this as lemonadep's
+bootloader entry; EDL is the same volumes *without* Power, plus the plug), then plug the **PC end** in a
+second later. `fastboot flash boot_b twrp-3.7.1_12-0-lemonadep.img`: current-slot `b`,
+`battery-voltage` 7008 mV at the time, 6.98 s, both OKAY. **Restoring iOS is
+`fastboot flash boot_b out/lemonadep-standalone.img` (22,315,008 bytes, also copied to
+`D:\ios port\ios-standalone\`) -- NOT `backup/partitions/boot_b.img`, which is the stock Android boot
+and boots nothing here.**
+
+TWRP stops at its splash (`recovery.log`: `Unable to mount '/data' ... current file system: 'hfsplus'`,
+then `prepdecrypt:: ... Device ready for decryption`) but it charges and `adb` comes up as root, so it is
+measurable. On a PC USB port (SDP), 02:08-02:11: `usb/type` = `USB`, `usb/current_now` 500000 (500 mA),
+`usb/voltage_now` 4.78-4.80 V (sagging below 5), `battery/status` Charging, `battery/voltage_now`
+3.601 -> 3.643 V over about three minutes, `battery/temp` 32.3-32.6 C, `battery/capacity` pinned at 1 %.
+So it gains, slowly. `battery/charge_full` = `charge_full_design` = 3192000 uAh and `cycle_count` 0:
+TWRP's kernel is generic and does not know this pack. **The input limit cannot be raised from here:**
+`usb/input_current_limit` reads 4804000, which is a *voltage*, and writing 1000000 does not change it --
+the attribute is mis-mapped in that kernel, so 500 mA is what a PC port gives. The Xiaomi 120 W brick
+also presents as SDP (its rate needs a Xiaomi handshake), while `usb/voltage_max` 9000000 says the kernel
+would take USB-PD from a proper C-to-C source. **Screen off in TWRP:**
+`echo 0 > /sys/class/backlight/panel0-backlight/brightness` (and `panel1`), from 1500 of 4095; restore
+with 1500. That is how it charges with the panel dark.
+
 ### >>> lemonadep 2026-10-29: GPU-accelerated iOS boots on the OnePlus 9 Pro <<<
 
 Via the HackiOS UEFI chain (Mesa/freedreno on the Adreno 660): blur, transparency, smooth UI,
