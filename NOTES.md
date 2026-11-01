@@ -233,6 +233,47 @@ Two things about the job runner (`userland/src/init.c` `run_command`), learned w
 has a built-in `sleep N` (no program), it honours a trailing `>> FILE`, and it does **not** print an
 exit status -- so the probe's own `probe: N failure(s)` line is the result.
 
+### >>> 2026-11-01 (12:00): second boot -- the probe's answer, and a stale binary <<<
+
+Same payload rebuilt with the widened log (`loader_return_after=420`), run 12:00:53-12:07:57,
+`metal2.log` **1,989,620 bytes**, 18,882 lines. The head fix worked: the drop marker is at line
+**9038**, far past the job list, and the probe's report is in the log:
+
+    $ /redwood/bin/hakios-metal-probe
+    probe: no GPU: no HakiosGPU service: the kernel has not started the GPU (gpu=1, ...)
+
+**The probe binary in the image was stale.** `src/iokit_transport.cpp` had been patched to ask for
+`RedwoodGPU` (the compat rename in `lemonadep/tools/hakios-metal-compat.py`), and
+`out/ios/libhakios-metal.a` and `obj/iokit_transport.o` both already carried the new string -- but
+`out/ios/hakios-metal-probe` was linked at 00:04, before the rename, so it still looked for
+`HakiosGPU`. Nothing was wrong with the kernel or the boot-args; `metal_test` in the same run found
+`RedwoodGPU` and drove it (102 submissions per 5 s, ~380 us of GPU work each, 10 frames a second).
+Relinked at 12:18 (9,484,720 bytes) and it now asks for `RedwoodGPU`.
+
+Why the probe binary did not follow the archive: `make ios MESA=1` dies on oosexgang's host-Mesa
+paths (`/home/vcvk/darwin-redwood-air/build/mesa-host/build/build.ninja`) while *creating*
+`out/host/ir3_compiler`, which only exists to regenerate `out/host/kernels/*.bc` and the
+`tests/fixtures/*_air.hpp` beside them -- all of which were already newer than their sources. The
+relink that works, without the fixture machinery:
+
+    LINK=$(make -n out/ios/hakios-metal-probe MESA=1 HAKIOS=/root/fkernel 2>/dev/null \
+        | sed -e ':a' -e '/\\$/N; s/\\\n//; ta' | grep -- '-o out/ios/hakios-metal-probe' | tail -1)
+    eval "$LINK"
+
+(the continuation join matters: the raw `make -n` line ends in `\` and `eval` then reports
+`no such file or directory: '\'`).
+
+**The user-client ABI was checked before the next boot, and matches.** Transport selectors
+`kGemClose 0x09`, `kGetParam 0x40`, `kGemNew 0x42`, `kGemInfo 0x43`, `kGemCpuPrep 0x44`,
+`kGemCpuFini 0x45`, `kGemSubmit 0x46`, `kWaitFence 0x47`, `kSubmitQueueNew 0x4a`,
+`kSubmitQueueClose 0x4b`, `kHakiosSurface 0x7e` are the kernel's numbers; the structs
+(`msm_param`, `msm_gem_new/info/cpu_prep/submit_cmd/submit_bo/submit/wait_fence`, `msm_submitqueue`,
+`drm_gem_close`, `redwood_surface`) are byte-identical field for field. Memory comes the same way on
+both sides: `IOConnectMapMemory64(c_, handle, ...)` arrives at `clientMemoryForType(type = handle)`,
+which returns `fBuffers[handle - 1]`'s descriptor -- so handles are 1-based on both sides and
+`IOServiceOpen(s, mach_task_self(), 0, &c)` (type 0) passes `initWithTask`. Upstream
+`hakios-metal` `origin/main` is still `a097abd`, 0 commits ahead of the local HEAD.
+
 ### >>> lemonadep 2026-10-29: GPU-accelerated iOS boots on the OnePlus 9 Pro <<<
 
 Via the HackiOS UEFI chain (Mesa/freedreno on the Adreno 660): blur, transparency, smooth UI,
