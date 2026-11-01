@@ -376,6 +376,60 @@ is %#llx into buffer 37 of pid N (11272192 bytes, flags 0)" instead of only the 
 TF into a statement about one buffer, and says whether the page that faulted is one the mapping pass
 claims to have written.
 
+### >>> 2026-11-01 (14:27, 14:49): fifth and sixth boots -- the page is mapped, in memory, and still refused <<<
+
+Two boots of `lemonadep/tools/gpu-fault-report.py`, which makes the fault itself answer three
+questions. Both logs are ~1.99 MB; the probe is unchanged and both times it reached the same first
+draw (`tri_flat`, 6 of 2016 pixels, a full 5,077,7xx us wait) and ended `probe: 189 failures`.
+
+**metal5** added the table walk. Fault: `address 0x237f0040, syndrome 0xb0012` (the low bit is the
+read/write bit: this one is a **read**). The address is `+0x130040` into
+`0x236c0000..0x2417ffff` (11,272,192 bytes) -- given one line after
+`redwood-gl: a new kind of texture: IOSurface attached ... 1125 x 2436`, so the window server's frame
+texture. The walk:
+
+    adreno: the tables for 0x237f0040: root[0] = 0x197703003 (table 1), level2[0x11b] = 0x236c81003
+      (table 31), level3[0x1f0] = 0x27262ce43: a page, memory at 0x27262c000
+
+The two lines about the owner were missing, and the reason matters for every later boot: `IOLog`
+does not reach this log in time -- the 342 `RedwoodGPU: buffer` lines that did appear all sit in the
+tail (line 19962 on), and what the fault put in that buffer was lost with the run. `printf` reaches
+the serial log at once (every `adreno:` line is there). The report uses `printf` now.
+
+**metal6** read the entries back through an uncached view -- what the SMMU's walk sees in memory, not
+what this processor has in cache -- and printed the context's own registers:
+
+    adreno: 0: THE SMMU REFUSED the 3D core: status 0x80000402, address 0x237b0040, syndrome 0xb0013
+    adreno: the tables for 0x237b0040: root[0] = 0x197707003 (table 1), level2[0x11b] = 0x237991003
+      (table 31), level3[0x1b0] = 0x272e64e43: a page, memory at 0x272e64000
+    adreno: the level 2 entry: memory holds 0x237991003, this processor wrote 0x237991003
+    adreno: the level 3 entry: memory holds 0x272e64e43, this processor wrote 0x272e64e43
+    adreno: the context: sctlr 0x127, ttbr0 0x197706000, and these tables start at 0x197706000;
+      smr0 0x84000000, s2cr0 0
+
+So the entries **are** in memory exactly as written, `ttbr0` is the address of the very tree the walk
+went through, translation is on, and stream 0 matches and goes to context 0, which translates. Both
+of the previous suspects are dead: the tables are not stale in this processor's cache, and the SMMU
+is not reading a different tree. This fault was a **write** (`0xb0013`), `+0x20040` into
+`0x23790000..0x2424ffff` -- row 45 of a 4544-byte row of the frame texture, which is where a frame
+draw would be when it stopped.
+
+**What brings it out is the probe, but the address is never the probe's.** `SMMU REFUSED` appears in
+metal3, metal4, metal5 and metal6 -- and in none of the GL-only boots (`auto2`, `loc6`, `join7`,
+`cap5`, `net8`, `st3`, `wv2`, `ss1`: zero each). So the window server draws frames for whole runs
+without a fault, and the fault arrives only when `hakios-metal` also has the core. Each time the
+address is the window server's frame texture at a granular offset (`+0x30040`, `+0x130040`,
+`+0x20040`: always 0x40 into a 64 KB granule, which is why the absolute addresses look so alike
+despite the base moving), and the syndrome alternates between a read and a write.
+
+The page being mapped, in memory, and still refused leaves two things standing: the **secure tag**
+(status bit 31 is set in all four: `0x80000402`, which the driver's own comment calls a secure
+context), and the fault record being **sticky** -- FSR keeps a fault until it is cleared, and the
+driver clears it only when it reports, so a run's first report can be about an access a moment before
+the submission that timed out. The next boot should put the probe's draw on the core **before** the
+window server draws, so that its own stream is the only one it can be, and the report names the
+client.
+
 ### >>> lemonadep 2026-10-29: GPU-accelerated iOS boots on the OnePlus 9 Pro <<<
 
 Via the HackiOS UEFI chain (Mesa/freedreno on the Adreno 660): blur, transparency, smooth UI,
