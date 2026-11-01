@@ -274,6 +274,108 @@ which returns `fBuffers[handle - 1]`'s descriptor -- so handles are 1-based on b
 `IOServiceOpen(s, mach_task_self(), 0, &c)` (type 0) passes `initWithTask`. Upstream
 `hakios-metal` `origin/main` is still `a097abd`, 0 commits ahead of the local HEAD.
 
+### >>> 2026-11-01 (12:28): third boot -- the probe runs end to end; compute works, draws hang <<<
+
+`metal3.log` **1,990,794 bytes**. The probe found the service, opened it, and ran its whole suite:
+`probe: GPU 0, chip id 0x6060001, 540 MHz, FAULTS 0` (0x06060001 is the Adreno 660), ending
+`probe: 153 failures` (134 `probe: FAIL` lines; the count also includes checks that report through
+other lines).
+
+**What works, all of it through `RedwoodGPUUserClient` and the real 3D core:** the 1 MB copy checked
+byte for byte and around its edges, fills, 40 command buffers in flight, the command processor's
+copy speed, and the whole compute stage -- `fill_id_air` at 64 to 4096 groups, `chain160_air`,
+`chain220_air`, `long_chain_air` (700 steps), `clz_id`, threadgroup memory, pointer phis. Kernels
+compile on the phone and match the host's: `compile fill_id.ll on the phone: 64 words, the same as
+the host's`. The texture stage passes too: `tex_fill` over R32Uint/RGBA32Uint/half, row padding,
+`tex_copy` through the isaml table, `Texture::read`, every address mode and border colour, array and
+3D stores, views of mip levels and slices, integer formats read as uint, `makeSampler` refusals.
+`iosurface: a BGRA8Unorm texture over IOSurface 73 (256-byte rows): wrapped, GPU address 0x3b000000`.
+`memory bandwidth: a 16 MiB copy 51 us (660.75 GB/s moved)`.
+
+**The first draw is where it breaks.** Section 9a's `tri_flat` hung, and the kernel says why:
+
+    adreno: gpu: no answer: submission 111 is the last, the core has done 109 ...
+    adreno: 0: THE SMMU REFUSED the 3D core: status 0x80000402, address 0x23760040, syndrome 0xb0013
+    adreno: gpu: THE 3D CORE IS RECOVERED (1 time in this run); submissions up to 111 are given up as done
+
+Status bit 1 is the SMMU's **TF** (`FSR_TF` in drivers/iommu/arm/arm-smmu/arm-smmu.h): a
+**translation fault** -- 0x23760000 was in no mapping when the GPU touched it, so this is not the
+read-only flag (`MSM_BO_GPU_READONLY` is only ever set on command buffers, and the target texture
+is made with `kBoWriteCombined` alone). Either a buffer was freed while a command buffer still named
+it, or an address was computed wrongly. Six pixels of the 2016-pixel triangle had been written, so
+the target itself was mapped and writable.
+
+After that first fault the driver is no longer a witness: the kernel gives the in-flight submissions
+up as done, and every later draw is reported with the same `the GPU did not finish it in 5 s and is
+not answering`. There were **52 `no answer` reports and 50 resets** in the run, none of them with an
+SMMU line: the draws hang, the kernel resets the core, and the next one hangs again. So the 134 FAIL
+lines after 9a say nothing about those features -- `tri_flat` is the only meaningful failure.
+
+**Real front-end gaps found before the draw** (these are worth reporting upstream, and are
+independent of the draw problem): `bytes_id` (a bitcast from 1x32 to 4x8 bits), `uniform_id`
+(`air.is_uniform.i16`), `pack_id` (`air.pack.unorm4x8.v4f16`), `undef_phi_id` (a phi of pointers
+whose operand comes over a loop edge), `width_id` (`air.thread_execution_width`), `ballot_id`
+(`air.simd_ballot`, 64-lane masks), private memory in a dispatch (`a[128]` a fiber: 2961 of 4096
+words right, so the layout is close but not right), and argument buffers (`argbuf_res: no texture
+bound at index 0`).
+
+Run ended in the usual dev-run panic, this time with `backboardd` as the panicked task.
+
+**Next, one boot with two answers built in:** `lemonadep/tools/gpu-address-log.py` makes the kernel
+print every GPU address given and given back (`gpu_log=2`), which says whether 0x23760000 was a
+freed buffer's hole; and `rc.jobs.hakiosmetal` now runs only `hakios-metal-probe --bisect`, whose
+section 9e draws `tri_flat` with each group of the render stream switched off in turn, one line
+each -- the probe's own answer to "which group can this GPU not do without".
+
+### >>> 2026-11-01 (13:39): fourth boot -- the address log says the fault is not a freed hole <<<
+
+`metal4.log` **1,991,248 bytes**. Same image as metal3 plus two changes: the kernel now carries
+`lemonadep/tools/gpu-address-log.py` (every GPU address given and given back, plus a line per client
+buffer), and the payload's cmdline adds `gpu_log=2`; `rc.jobs.hakiosmetal` runs only
+`hakios-metal-probe --bisect`. The probe found the service again -- `probe: GPU 0, chip id 0x6060001,
+540 MHz, FAULTS 0` -- and reached the same first draw: **9a's `tri_flat` waited its full 5,077,712 us
+and had written 6 of 2016 pixels**, exactly as in metal3. `probe: 189 failures` (169 `probe: FAIL`
+lines).
+
+**The fault is inside a live buffer that was never freed.** This run it was
+`adreno: 0: THE SMMU REFUSED the 3D core: status 0x80000402, address 0x237b0040, syndrome 0xb0013`
+(submission 112; the core had done 109). 1,033 addresses were given and 292 given back in the log, and
+exactly one give covers 0x237b0040:
+
+    5468: adreno: address 0x23780000..0x2423ffff given (11272192 bytes)
+
+and **no `given back` line in the whole log covers that address**. It was given at 13:39:29.121, one
+line after `redwood-gl: a new kind of texture: IOSurface attached, internal format 0x80e1, format
+0x80e1, type 0x1401, 1125 x 2436` -- the window server's frame texture, through
+`RedwoodGPUUserClient::surfaceBuffer` (which maps every 4 KB page in `newBuffer` and refuses the
+whole buffer if one page cannot be entered). Of 235 `RedwoodGPU: buffer` lines, **none** is followed by
+`cannot be entered` or `no addresses left`: the driver counted this buffer as mapped. So metal3's
+"a buffer was freed while a command buffer still named it" is **ruled out**: the page was live and
+claimed mapped, and the SMMU still said TF.
+
+The one thing the hole *does* explain is the address: 0x23780000 is where the probe's 64 KB scratch
+buffer had been given and given back eight times earlier in the same run (lines 2837-2901), so the
+11 MB texture took that hole and ran far past it. The fault is **0x30040 into the 11 MB buffer**, three
+64 KB granules above the reused hole, so it is not the hole's own tail: it is a page the mapping
+should have covered.
+
+**The bisect answered nothing, and that is the run's lesson.** All 33 `bisect:` lines say `hung`, at
+39-89 us each -- not 5 s. The suite had already faulted the core in section 9a, minutes before section
+9e ran, so every variant was submitted to a core the kernel had given up on and had reset
+(`THE 3D CORE IS RECOVERED`). A bisect that runs *after* the failure it is meant to explain measures
+the failure's aftermath. It has to be the first submission of the run.
+
+Two other things worth keeping: the log drop marker fell at line 9734 of ~19000, so both the window
+server's allocation (5468) and the fault (5625) are in the kept head, and `gpu_log=2` cost the probe
+nothing -- its report survived because the job list runs it first.
+
+**Next, two small changes and one boot:** run the bisect first (`--bisect` before section 9a, or a
+`--only 9e` that skips the suite), and have the fault path name the owner of the address --
+`RedwoodGPU.cpp` already holds every client's buffers and sizes, so the SMMU report can say "0x237b0040
+is %#llx into buffer 37 of pid N (11272192 bytes, flags 0)" instead of only the number. That turns a
+TF into a statement about one buffer, and says whether the page that faulted is one the mapping pass
+claims to have written.
+
 ### >>> lemonadep 2026-10-29: GPU-accelerated iOS boots on the OnePlus 9 Pro <<<
 
 Via the HackiOS UEFI chain (Mesa/freedreno on the Adreno 660): blur, transparency, smooth UI,
