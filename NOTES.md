@@ -204,6 +204,35 @@ would take USB-PD from a proper C-to-C source. **Screen off in TWRP:**
 `echo 0 > /sys/class/backlight/panel0-backlight/brightness` (and `panel1`), from 1500 of 4095; restore
 with 1500. That is how it charges with the panel dark.
 
+### >>> 2026-11-01 (11:30): the first `hakios-metal` boot, and where its log went <<<
+
+`run-payload.bin` 41,019,952 bytes (kernel + the 00:36 `root.apfs`), boot-args `gpu=1 metal=1
+gpu_recover=1`, `loader_return_after=240`. The run booted and the plug-in worked: `metal_props on
+HakiosMetal HakiosMetalDevice`, `Metal would open /System/Library/Extensions/HakiosMetal.bundle: it is
+there`, all of HakiosMetal's classes registered, `MTLCreateSystemDefaultDevice() = "HakiOS Adreno 642L
+(Metal: a device that exists, nothing more)"` with registry id 5635 (and 8963 for the CoreImage
+process), `Apple family 1/4 1/0`, and CoreImage over EAGL rendered -- `first pixel 0 229 255 255`.
+mediaserverd and backboardd each said `is not shown the device (metal=1; 1 is metal_test only, 2 all
+but backboardd, 3 all)`, which is what `metal=1` is for. Run ended in the known dev-run panic
+`Console I/O from interrupt-disabled context @serial_console.c:168`.
+
+**The probe ran but its output is not in `metal1.log`, and that is a log-window problem, not a
+launch problem.** `rc.jobs.hakiosmetal` does call `/redwood/bin/hakios-metal-probe` (1609 bytes in the
+image, and the `$` line for it is simply absent because it was printed inside the dropped part). The
+kernel keeps the **first 256 KB** of the log as it is and then a **1 MB ring**, dropping everything
+between (`[... the log between the first 256 KB and the last 1 MB was dropped ...]`, line 3154 of
+12,144). The job starts at byte **164,093** of the log, so only ~92 KB of head was left, and
+`metal_test`'s ~890 lines used all of it. Fix: `xnu/files/osfmk/arm64/loader_return.c` now has
+`LOADER_LOG_SIZE` 2048 KB, `LOADER_LOG_HEAD` **1 MB**, `LOADER_LOG_RING` **768 KB** (head+ring 1792 KB
+because the loader's `out_buf` is 2 MB -- room is left for the loader's own log and the two
+separators, so nothing is truncated). The buffer is BSS, so the kernel is still 15,734,880 bytes.
+The file has to be copied into `xnu-src` by hand: `xnu/apply.sh` refuses a tree that already exists.
+`rc.jobs.hakiosmetal` also runs the probe **first** now -- only the head is guaranteed.
+
+Two things about the job runner (`userland/src/init.c` `run_command`), learned while chasing this: it
+has a built-in `sleep N` (no program), it honours a trailing `>> FILE`, and it does **not** print an
+exit status -- so the probe's own `probe: N failure(s)` line is the result.
+
 ### >>> lemonadep 2026-10-29: GPU-accelerated iOS boots on the OnePlus 9 Pro <<<
 
 Via the HackiOS UEFI chain (Mesa/freedreno on the Adreno 660): blur, transparency, smooth UI,
