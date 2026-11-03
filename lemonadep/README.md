@@ -164,6 +164,20 @@ Replicate (WSL lab with furangelz's hackios-xnu-kernel/userland at `~/fkernel`, 
 Wi-Fi credentials go in `~/fkernel/fw-wlan/network` before building (gitignored; the image then carries them).
 Undo: `fastboot flash boot_<slot> backup/partitions/boot_<slot>.img`. Details: HANDOFF.md, top.
 
+## Linux on this phone (started 2026-11-03)
+
+A separate track lives in [`linux/`](linux/): a plan and the first artifacts for running a **mainline Linux
+kernel** here with a **Luma ARM64** userland on **Armada's boot mechanics** (Mu-Silicium UEFI + `dtbloader` +
+systemd-boot). It reuses what the iOS port measured -- UEFI on this exact phone, the command-mode panel,
+touch, keys, UFS, the ath11k firmware path and the charger's behaviour -- and starts from the existing
+`op9pro-mainline-poc` work rather than from nothing.
+
+Nothing in it has booted yet. [`linux/PLAN.md`](linux/PLAN.md) is the decision record and the phase list;
+[`linux/dts-checklist.md`](linux/dts-checklist.md) is every measured value mapped to the mainline node that
+still has to be confirmed; [`linux/boot/README.md`](linux/boot/README.md) describes both boot paths. The one
+tested piece is `linux/boot/pack-bootimg.sh` (v3 header, `os_version` 16.0.0 / `os_patch_level` 2026-08,
+read back with `unpack_bootimg.py`); everything else there is a plan, clearly marked as such.
+
 ## GPU bring-up
 
 The Adreno 660 has a GMU, a small Cortex-M3 that owns GPU power and has to be cold-started with Qualcomm's firmware before the GPU does anything. There is no existing XNU driver for any Adreno to build on. We checked UniXNU, UniXNU-sweet, ios-guacamole, ios-topaz and ios-sailfish: the working ones are a GMU-less generation (Adreno 5xx) or a different chip. So `lemonadep/xnu/gpu/` is a native driver: register sequences sourced from Linux's `drivers/gpu/drm/msm/adreno/a6xx_gmu.c` (pinned, sha256-verified) and mainline `sm8350.dtsi`, every piece host-tested against mock hardware before it runs on the phone.
