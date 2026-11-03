@@ -22,3 +22,6 @@ lemonadep/fw-vendor/
 
 # build output (Apple system image, images carrying Wi-Fi credentials and vendor firmware)
 lemonadep/out/
+
+# mkbootimg writes kernel/ramdisk into ./out unless told otherwise
+lemonadep/linux/boot/out/
