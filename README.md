@@ -22,7 +22,8 @@ OnePlus 9 Pro (`lemonadep`, Qualcomm SM8350 / Snapdragon 888) port in two genera
 | Works | |
 | --- | --- |
 | Standalone boot | UEFI + XNU loader + kernel in `boot_b`; the 2.4 GB iOS system image is read from `userdata` at boot |
-| Display, GPU | Adreno 660 through Mesa (GL): blur, transparency, smooth animation |
+| Display, GPU | Adreno 660 through Mesa (GL): blur, transparency, smooth animation. Panel at 120 Hz with the vsync-period fix (`fb_hz=120`) |
+| Metal, applications only | `metal=2` "sandwich": apps get a Metal device, `backboardd` keeps the proven OpenGL ES path (Metal for the window server does not work yet — the driver itself reaches "window server draws on the GPU, zero refused" on 2026-11-02) |
 | Touch, buttons, battery, backlight | |
 | Wi-Fi | QCA6490 with Linux's ath11k over PCIe; join at boot or from Settings, status bar, DHCP by iOS itself |
 | Safari | pages and video |
@@ -33,14 +34,18 @@ OnePlus 9 Pro (`lemonadep`, Qualcomm SM8350 / Snapdragon 888) port in two genera
 | Not working yet | Why (as far as known) |
 | --- | --- |
 | Sound (speaker, Safari, system sounds) | the audio DSP starts, but nothing is heard: speaker path not brought up on this phone |
-| Weather data, Maps tiles | Weather requests are FairPlay-signed (no Secure Enclave); Maps not investigated |
+| Weather data | requests are Mescal/FairPlay-signed and fail with `code=12`; an unsigned request answers 401. WeatherCore's own "Local - Mock Server" environment (`http://localhost:5033`) is now reachable from a shim, but the app still sends no request (2026-11-03) |
+| Maps tiles | **not** a Metal problem: `gspe19-ssl.ls.apple.com` answers **403 with 0 bytes** to unsigned tile requests, so there is nothing to draw |
+| Charging from a charger | the MP2650 never acknowledges on I²C (`status 0xff faults 0xff`); charging is owned by the ADSP, whose firmware (`fw-audio`) is not in the image |
 | Bluetooth, cellular, camera | not started |
 | Power off with the Power button | use the five-finger hold (1.5 s) or iOS's own power off, which save your data |
 
 ## How to reproduce
 
-The full recipe, the root cause of every fix and the debugging tools are in
-**[`lemonadep/HANDOFF.md`](lemonadep/HANDOFF.md)** (start there) and
+The last two days, consolidated with every measurement and every corrected claim, are in
+**[`lemonadep/hackios/FINDINGS-2026-11-01-03.md`](lemonadep/hackios/FINDINGS-2026-11-01-03.md)** — read that
+first for the GPU split, 120 Hz, Weather/Maps and charging. The full recipe, the root cause of every fix and
+the debugging tools are in **[`lemonadep/HANDOFF.md`](lemonadep/HANDOFF.md)** and
 **[`lemonadep/README.md`](lemonadep/README.md#standalone-hackios-boot-no-computer)**. In short:
 
 1. **Back up** every partition first (TWRP / `dd`), at least `boot_a`, `boot_b`, `vendor_boot_*`, `dtbo_*`.

@@ -2859,3 +2859,294 @@ NEXT: re-run `gh workflow run lemonadep.yml -f build_kernel=true` once a macOS r
 confirmed available again, then `gh run download <id> -n xnu-kernel-lemonadep`, then
 boot via `lemonadep/m5-battery-dpu-build.sh` with `board=lemonadep battery=1
 backlight=1` (temporary `fastboot boot`, confirm with user first).
+
+## 2026-11-01: depth-less draws fixed in the driver (metal11), standalone rebuilt
+
+- Diagnosis, measured twice: the probe's `tri_flat` draw **with** a `Depth32Float` attachment
+  completes (4096/4096 pixels, 59 us); the identical draw with **no** depth attachment stops after
+  6 of 2016 pixels and the GPU never answers. Not a register: `EARLY_Z`/`LATE_Z` and
+  `RB_DEPTH_FLAG_BUFFER_BASE` variants both reproduced `6 of 2016` (metal10).
+- Fix: `render::Options::zsScratchDepth` (default on) in hakios-metal's `render.cpp` -- a pass that
+  names no depth attachment is drawn into a private `Depth32Float` scratch image (LoadAction/
+  StoreAction `DontCare`, Metal's default depth state: Always, no write), one per target size in the
+  queue. Result: `probe: ok draw first: 2016 of 2016 ... FAULTS 0`; harness `ok` lines 15 -> 293,
+  FAIL 162 -> 32 (metal11.log).
+- Log ceiling: kernel log head 4 MB / ring 1.5 MB, loader staging 8 MB -- metal9's `--bisect` sweep
+  results had fallen into the dropped middle of the log.
+- Regression and its repair: the first harness image rebuild dropped `GL=1`, so
+  `/redwood/lib/libredwood-gl.dylib` (CoreAnimation's GL shim, and the place the Metal driver is
+  linked in) was missing from root.apfs and the UI fell back to the software path. root.apfs rebuilt
+  with the profile's `USERLAND_VARS` (`GL=1 ADSP=1 DENY_EXTRA=com.apple.apsd ALLOW=locationd ...`)
+  and verified to contain `libredwood-gl.dylib`, `libOSMesa`, `redwoodmetal`.
+- Standalone (`boot_b`) rebuilt from that root.apfs with the same UEFI/DTB
+  (`FZ=/root/Mu-Silicium`) and flashed 2026-11-01 21:13. The previous image is kept as
+  `out/hackios/lemonadep-standalone.known-good.img` (22,315,008 B, 2026-10-31 01:12) -- Wi-Fi, touch,
+  buttons and /var store as they were; flash it back to boot_b to return.
+- Not touched: `userland/system.apfs` and the phone's raw system image at userdata + 16 GiB, the
+  var store, and the kernel/loader sources outside the three patch scripts in `lemonadep/tools/`.
+
+## 2026-11-01 evening: why the black screen (the probe's sweep was in the boot path)
+
+Captured from a USB run (metal12.log) while the phone sat black: iOS was **running** — SpringBoard
+alive, backlight set, `redwood: the server has an accelerated renderer`, and CA's context is
+`OpenGL ES 3 context ... Mesa 25.0.7; FD660` (OSMesa, off-screen). The black screen was not a dead
+phone and not the depth fix: the image's baked boot profile was `rc.jobs.hakiosmetal`, i.e. the
+diagnostic one, which runs `/redwood/bin/hakios-metal-probe --draw-first --bisect` on **every** boot.
+That sweep's control case is the depth-less draw, which leaves the GPU unresponsive for the rest of
+the run ("without gpu_recover=1 the kernel waits for nothing again in this run"), so the Mesa
+renderer had a dead core and nothing reached the panel; the loader then restarted iOS.
+
+Fixed:
+- `userland/build.sh` rebuilt with the **default** `RC_JOBS` (`rc.jobs`: hello_dyn, svc_test,
+  surf_test, ps, mg_test, cpu_test) — `root/etc/rc.jobs` is 351 bytes again, no probe in the boot path.
+- `gpu_recover=1` added to `BOOTARGS` in `common/devices/lemonadep.conf`, so a hung submission is
+  recovered rather than ending the run. The rest of the line is unchanged (buttons, touchscreen,
+  touch_power, gpu, battery, backlight, adsp, sweetwlan/wlan_ath/wifi_join/wifi_mac, ufs/var_store).
+- `lemonadep-standalone.img` rebuilt (25,837,568 B, 21:40) and flashed to `boot_b` 2026-11-01 21:44.
+  Rollback unchanged: `out/hackios/lemonadep-standalone.known-good.img`.
+
+## What "Metal on the screen" still needs (measured, not guessed)
+
+`src/inject.c:564` prints `redwood: metal: no device in this process; CoreAnimation keeps OpenGL ES
+by itself` inside backboardd. The Metal device is only published to the programs listed in
+`/redwood/lib/HakiosMetal.clients` — currently `metal_test` and `hakios-metal-probe` — and that gate
+is only active for a boot with `metal=1` (iokit/Kernel/MiniIOMobileFramebuffer.cpp), which the
+lemonadep profile does not set. So the compositor has never been on the Metal path; the probe's wins
+(2016/2016, 59 us, and now `zsScratchDepth`) are real but only the probe exercises them.
+Next step is its own boot test: `metal=1` plus `backboardd`/`SpringBoard` in `HakiosMetal.clients`,
+watched over USB (a half-made device aborts the process that asks, and launchd restarts it).
+
+## 2026-11-01 22:05: metal=3 works -- the driver is now found in backboardd, SpringBoard, mediaserverd
+
+`metal-publish.py` (lemonadep/tools): `IOAcceleratorES` now publishes `MetalPluginName = HakiosMetal`
+and `MetalPluginClassName = HakiosMetalDevice` itself at `registerService()` when the boot-arg is
+`metal >= 3`, instead of waiting for a program to set them. Nobody was setting them at boot, so every
+process's Metal lookup found an accelerator without a driver -- that is what the old
+`redwood: metal: no device in this process` line meant, and it was not a driver failure.
+
+metal15.log (kernel with that patch, `metal=3`, `RC_JOBS=rc.jobs` -- no probe), measured:
+- `backboardd`: `HakiosMetal: the class HakiosMetalDevice is registered (a subclass of _MTLDevice)`
+  and `HakiosMetalLibrary is registered`.
+- `mediaserverd`: the same two lines.
+- `SpringBoard`: `the class HakiosMetalDevice is registered` **and**
+  `redwood: Siri's orb prewarms its shaders; MTLCreateSystemDefaultDevice() = HakiosMetalDevice`.
+- then our own shim takes the device back out of the window server and mediaserverd:
+  `redwood: metal: HakiosMetalDevice taken out of the window server (1 in the list, 0 now);
+  MTLCreateSystemDefaultDevice() = nil`, and CoreAnimation keeps `OpenGL ES 3.2 Mesa 25.0.7; FD660`.
+
+That removal is deliberate (`userland/src/inject.c:505-560`, `keep_metal_from_core_animation()`): it
+was written when CA's Metal renderer asserted on a `default.metallib` that the image did not carry.
+**The switch is `camtl=1`** -- with it the shim leaves the device where it is. The image carries
+`default.metallib` (127 occurrences in `userland/system.apfs`, plus `default.pipelinelib`), so the
+assertion's cause is gone.
+
+Built and staged 22:13, not yet run to completion: `run-payload.bin` with
+`gpu=1 metal=3 camtl=1 gpu_recover=1` (`common/devices/lemonadep.conf` BOOTARGS; note `EXTRA=` from
+build-boot.sh does *not* reach the kernel -- only the payload cmdline -- so profile changes go in the
+conf). The next run is the one that answers "does CoreAnimation draw on Metal": look for the
+`keep_metal_from_core_animation` line to be absent, and for a Metal renderer instead of the OSMesa one.
+
+## Reading: how the other ports get Metal on the screen (2026-11-01 late)
+
+Three repos the user pointed at, and what each says about CoreAnimation-on-Metal:
+
+- **superboyyy/hakios-arm64e-dada** (iOS 26, Xiaomi 15 / SM8750) -- "GPU: Adreno 830 powered up.
+  Metal goes through **metal2vulkan** (Metal -> Vulkan), then Turnip, then our kernel driver, and runs
+  on the Adreno"; "iOS 26 reaches the home screen"; "Liquid Glass: core shaders translate correctly
+  (compared pixel by pixel against Apple's GPU on a Mac)". Its `gpu2/` holds the patches and build
+  scripts: `build_turnip_ios.sh`, `build_bridge.sh`, `build_plugin.sh`, an `M2V-NEXT.md` upgrade
+  report, and a Rust `bridge` producing `RedwoodMetal.bundle` *out of NativeMetal*, not a hand-written
+  MTLDevice. `M2V-NEXT.md` also records the exact class of fix this driver needed: "0202 返回拒绝
+  encoder，不返回 nil" -- a refusing encoder rather than nil, because a nil is what crashes the
+  caller.
+- **oosexgang/hakios-xnu-userland** (the upstream this port is built on, iOS 16.5, redwood):
+  "Adreno 642L GPU through Mesa/freedreno (gpu=1, **OpenGL ES for CoreAnimation**)" and "Metal for
+  apps (in progress: 293 of 456 system shaders already run on the Adreno)". So upstream has never run
+  the window server on Metal either -- the stub-device road is exactly the in-progress one, and the
+  shader count is the real measure of it.
+- **soumarcelino/fiio-jm21-xnu**, **NWylynko/ios-flame**: other XNU-to-Android ports (SM6115 /
+  similar); read for the kernel-side patterns (loader, DTB, drivers), nothing on Metal beyond the
+  same Mesa-for-CA arrangement.
+
+Consequence for lemonadep: getting CoreAnimation off OSMesa and onto Metal has two roads, and they
+are different sizes. (1) finish the stub MTLDevice (this driver): cheap and incremental, currently at
+CA's pipeline-library builder (`-targetDeviceInfo`, patched, `tools/hakios-target-device-info.py`),
+with 141 of QuartzCore's functions already compiling through AIR. (2) port metal2vulkan + Turnip's
+Vulkan driver + a NativeMetal-style bridge, as dada did with `gpu2/`: that is what produced a real
+Metal home screen elsewhere, and it is a project rather than a patch. The stub road is worth finishing
+first because everything it teaches (device publication, clients, CA's expectations) is needed by the
+second one anyway.
+
+## 2026-11-01 23:20: real pipeline states and the draw -- the encoder now draws, not logs
+
+`tools/hakios-pipeline-draw.py` (applied to `/root/hakios-metal`, builds clean through
+`userland/build.sh` with `PATH=/root/fkernel/xnu-deps/host/bin` -- *not* a bare call, which falls
+back to PREBUILT):
+
+- `-newRenderPipelineStateWithDescriptor:error:` makes a real `hakios_metal_program` with
+  `hakios_metal_program_new_bitcode`, whose modules come from `hakios_metallib_bitcode` (the same
+  wrapper-stripped AIR `-bitcodeData` returns), and the colour attachment's pixel format. Holds it in
+  a `HakiosMetalPipelineReal` (`_MTLRenderPipelineState` subclass), frees the program with the object.
+- the render encoder keeps Metal's state: the pipeline's program, both stages' buffers and offsets,
+  viewport, scissor, and the descriptor's colour attachment + load/store/clear colour. Each
+  `-drawPrimitives:...` becomes `hakios_metal_cb_draw2` over that attachment -- one whole pass, the
+  first draw with the descriptor's load action (Clear when it asked to be), the rest Load.
+- the placeholder `hakiosRenderNothing`/`hakiosRenderDraw` are gone; every method the encoder records
+  is real, and the encoder still answers unknown selectors with zero instead of throwing.
+
+Built into `root.apfs` 23:19, `lemonadep-standalone.img` 23:20 (cpus=8 bootcpu=7 cpufreq=1
+buttons=1 touchscreen=1 touch_power=1 gpu=1 metal=3 camtl=1 gpu_recover=1 battery=1 backlight=1
+adsp=1 sweetwlan=17 wlan_msi=1 wlan_ath=1 wifi_join=1 wifi=1 fbwidth=1242 fbheight=2688),
+flashed to `boot_b` (the slot this phone boots), and booted on the phone. The boot before this one
+(`lemonadep-standalone.known-good.img`) is still on disk as the way back.
+
+What the log will say, in order, if this works: `newRenderPipelineStateWithDescriptor: <vs+fs>,
+colour format N` for CA's pipelines, `render encoder made: colour attachment real, load 2, store 1`,
+then `render encoder: draw N refused: <reason>` only when `hakios_metal_cb_draw2` says why. The
+refusal reasons are the next iteration's list; a `signal 11` or `unrecognized selector` means a wall
+of the earlier kind.
+
+## 2026-11-02: in-module calls carry a computed pointer offset as an integer parameter
+
+`tools/air-call-offset-param.py` (applied to `/root/fkernel`, idempotent, builds clean):
+`translate_callee` no longer refuses a pointer argument carrying a byte offset. The class, binding
+and pointee are translation-time facts the callee copies; only the offset crosses, as one extra
+integer `nir_function_param` per offset argument, appended in argument order on both sides. The
+callee rebuilds its `air_ptr` with `offset = nir_load_param`, and `nir_inline_functions` folds the
+call away. The callee stays specialised to its call site (never cached), like the bound texture
+and sampler arguments beside it. An aggregate smuggling a computed offset is still refused; the
+static-initializer path passes NULL flags (it never takes arguments).
+
+Measured on the host build (`tools/air/mk-host.sh`; needed `libdrm-dev` installed first -- meson
+had cached `libdrm found: NO`, fixed with a `--wipe` reconfigure, same flags):
+- synthetic kernel with an in-module call passing a thread-dependent (`gid`-shifted) pointer:
+  refused before (`a call passing a pointer at a computed offset`), translates after, output NIR
+  shows the call-site and callee offsets correctly summed into one `load_ssbo`, and `ir3_compiler`
+  (Adreno 7c+ Gen 3, `0x007506030500`) compiles it. Gate temporarily restored once to prove the
+  test exercises it (refused again), then re-applied.
+- corpus unchanged: `container 456/456, reader 456/456, translate 321/456, ir3 321/456`, same as
+  the committed `docs/air-report.md`, and no `a call passing` refusal in any of the four corpus
+  libraries, MPSImage, or QuartzCore. No corpus module passes an offset pointer into a callee,
+  so this path is new capability with no behaviour change to existing inputs.
+- note: WSL `/tmp` does not persist between tool calls here; keep cross-call artifacts under
+  `/root/fkernel/build/`, never `/tmp`.
+
+## 2026-11-02 metal77: MPS gate passed on the phone, blur kernel names its next refusal (not flashed)
+
+Hands-free USB run only -- nothing flashed, per the rule (boot patched over USB, flash only when
+clean). Loader was already up (`xnuloader`), session kept; rebuilt cross Mesa (`AIR=1
+tools/mk-mesa.sh`, patch confirmed in the cross tree via `need_off`), `userland/build.sh`, and
+`build-boot.sh` (`SECS=170`, `FZ=/root/Mu-Silicium` -- the default `FZ=/root/hakios/fz/Mu-Silicium`
+does not exist; the tree lives at `/root/Mu-Silicium` via the `Mu-Silicium` symlink).
+`usb-test.sh metal77.log 150`: payload staged, run started 14:14:06, log 2,457,184 bytes.
+
+- zero `a call passing` refusals anywhere in the log -- the offset-param fix holds on device.
+- `newFunctionWithName:D8F18H` resolves, `compute pipeline (descriptor): building D8F18H (9088
+  bytes)` -- then the kernel itself is refused: `instruction: a pointer loaded from scratch memory
+  through a non-constant offset (block 1, instruction 4, opcode 15)`. Same for `D8F18V` (4x each).
+  Its dispatches will refuse (refusing shape, process lives).
+- `redwood: Siri's orb: the prewarm RETURNED -- it did not abort this time`: SpringBoard passes
+  the MPS gate that SIGABRTed it before. backboardd is still compositing at the tail of the run
+  (`colour attachment real`, encoders ending clean, 0 draws).
+- NOT flashed: the blur kernel compiles to a refusal, not a kernel, so `boot_b` keeps the old
+  image. Next: the dynamic scratch load -- a run-time index into threadgroup/scratch memory,
+  which the spill table (constant offsets only) cannot answer.
+
+## 2026-11-02: carry caller spill slots into callees; D8F18H translates on host
+
+`tools/air-call-carry-slots.py` (applied to `/root/fkernel`, idempotent): two halves of the same
+wall. (1) A constant pointer offset is a translation-time fact like the class and binding: the
+callee re-materializes it as a fresh `nir_imm_int` instead of taking an integer parameter, so
+GEPs fold and the spill table answers. Only a genuinely computed offset still rides as a param.
+(2) The spill table is shared with the callee but `AIR_OP_CALL` forgets it first -- sound for
+untrackable callee stores, fatal for a loader that only reads. So the caller captures
+(slot, resolution) pairs for scratch slots handed to the call BEFORE forgetting, and the callee
+re-records copies after its tables are swapped. Only def-free resolutions cross (bare bindings or
+aggregates of those); anything else refuses as before. Threaded explicitly through
+`air_translate_call` -> `air_call_in_module` -> `translate_callee` (new `struct air_slot_carry` in
+`air_private.h`); wrapper and static-init paths pass NULL. Needed a forward-declaration fix
+(`val_shareable` used before defined) -- first placement was wrong (after the use), corrected to
+before `translate_instruction`.
+
+Host proof on the REAL kernel, dumped from the device image
+(`MPSImage.framework/default.metallib`, `D8F18H.bc`, 9088 bytes -- matches the on-phone log):
+`air2nir D8F18H.bc` translates (full NIR, texture sampling, inlined sampler), `ir3_compiler`
+builds it for the Adreno. Corpus unchanged: 321/456. Cross mesa rebuilt (`AIR=1 mk-mesa.sh`,
+`need_off`/`ncarry` present in the cross tree), userland + `build-boot.sh` (`SECS=170`) clean.
+
+## 2026-11-02 metal78: SpringBoard reaped before the blur (no flash)
+
+`usb-test.sh metal78.log 150` (loader still up, session kept): 2.2 MB log, zero `a call passing`
+refusals, zero `non-constant offset`, zero `no kernel` -- the offset-param fix holds on device. But
+no `D8F18H` lines at all: SpringBoard cycled pid 7 -> 39 -> 67 -> 70 (`respawn ... because
+inefficient`), never reaching the Siri orb prewarm. Cause: backboardd itself crash-loops (~10 s
+period, `service has crashed N times in a row`, SIGSEGV, pids 10 -> 37 -> 40 -> ...) and each
+death reaps SpringBoard. SAME shape in metal77 (pids 10, 37, 41, ...; 11 sigs in both logs) --
+pre-existing, not a regression; metal77 just got lucky with timing and its SpringBoard[7] reached
+the blur between backboardd deaths.
+
+Best lead on the backboardd crash: right before one SIGSEGV (`pc` in the shared cache,
+fault `x0+0x20`, classic message-to-bad-object), the Apple-logo progress window builds
+`fixed_vert_lph_spc + fixed_frag_lph_cph` and the fragment refuses with `a pointer loaded from
+scratch memory (block 30, instruction 13)` -- then `render encoder ended: 1 draws, 2 refused`,
+pipeline deallocs, SIGSEGV. Frame symbolicating against the bundle was unreliable (static
+symbols misattributed); proper symbolication still open. metal79 re-run launched to retry the
+blur race with the fixed kernel in place.
+  so this path is new capability with no behaviour change to existing inputs.
+- note: WSL `/tmp` does not persist between tool calls here; keep cross-call artifacts under
+  `/root/fkernel/build/`, never `/tmp`.
+
+## 2026-11-02 metal80-88: window server draws on the GPU, zero refused, zero hangs
+
+Eight runs, four driver fixes, one reverted experiment restored. End state
+(metal88, window-server image): `render encoder ended: N draws, 0 refused`
+on every encoder (510x 8-draw, 185x 9-draw, 178x 10-draw commits), zero
+`no answer: submission` GPU hangs, zero SIGSEGV/SIGABRT, one SpringBoard[7]
+and one backboardd[10] for the whole run.
+
+- metal80: fb-slots (FS table 16->24, `tools/hakios-fb-slots.py`) built the
+  fixed pipeline, but every draw refused `reads [[color(1)]]: no attachment 1`.
+  The plug-in only recorded colorAttachments[0].
+- `tools/hakios-attachments.py`: the encoder loops all 8 colorAttachments
+  into `hakios_metal_render_pass.more`. metal81-82: mask 11000000, but the
+  shader reads [[color(2)]] -- `no colour attachment 2`, 8232x.
+- `tools/hakios-missing-fetch.py`: a fetch of a pass-missing attachment
+  samples the null texture (Apple answers zero) instead of refusing.
+  metal83: zero colorN refusals; next wall `no buffer bound at index 8`.
+- `tools/hakios-null-ssbo.py`: gfxIbos takes ssboWrites; an unbound highest
+  SSBO slot takes the null descriptor when its stage writes nothing
+  (fixed_frag declares 9 device buffers, binds 8, writes none). metal84-85:
+  ZERO refusals, commits with 86 draws -- but every submission wedged the
+  GPU (ring stuck at 27/39, `THE 3D CORE IS RECOVERED` every ~5 s).
+- metal86 (probe image `RC_JOBS=rc.jobs.hakiosmetal`): the probe's bisect
+  showed EVERY 3D draw hanging at 6/2016 pixels = the metal9 depth-less
+  signature. The zs-scratch revert was wrong: scratch depth is the cure.
+- `tools/hakios-scratch-depth.py`: re-applied the scratch attach as OPT-IN
+  (`zsScratchDepth` default false so the fake-GPU goldens stay pinned;
+  C API draw2/3/indexed and the probe's draw-first + whole-stream variant
+  enable it; multisample passes keep old behavior since only 1x hung).
+  Host suite back at the 29 pre-existing failures (the one c_api MSAA test
+  needed no update after the single-sample guard).
+- metal87 (probe image): `draw first: 2016 of 2016 interior, 577 us,
+  FAULTS 0` -- the GPU executes draws. metal88 (window-server image):
+  the run above. Next: verify pixels on screen (probe proved pixel
+  correctness on its own target; backboardd output not yet seen), then
+  charging/sleep and newer iOS as requested.
+
+## 2026-11-02 metal89-90: teardown panic fixed, clean runs; panel still not showing iOS
+
+metal89 (window-server image) drew clean until the run's end (742x 8-draw,
+186x 10-draw encoders, all 0 refused, no GPU hangs), then died in teardown:
+`panic: Console I/O from interrupt-disabled context @serial_console.c:168`.
+Symbolicated with nm against the linked kernel (slide 0): IRQ ->
+psci_smp_stop_here -> loader_return -> redwood_dpu_restore -> say/printf ->
+cnputs assert. The backlight-stats printf in redwood_dpu_restore ran from
+interrupt context when loader_return_after expired (metal87 probe image died
+the same way; metal85/86/88 won the race). Fix: printf removed (counts stay
+in variables); mirrored to xnu/files (source of truth) and xnu-src (build
+tree). Kernel relinked, offending string gone from the binary. metal90:
+zero panics, 669x 8-draw / 129x 9-draw / 76x 10-draw commits, all 0 refused,
+zero hangs -- clean end-to-end. NOTE: export-check error at the end of
+xnu-build.sh is normal per xnu/README.md; judge by the binary. Panel after
+a clean run still shows the frozen boot framebuffer (two rows of blue lines
+on black): presentation of composited IOSurfaces is the next wall.

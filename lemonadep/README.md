@@ -139,14 +139,23 @@ Look for `SWEET KEYS:`, `SWEET TOUCH:` and `SWEET GPU:` lines. After a test, hol
 
 ## Standalone HackiOS boot (no computer)
 
-Status (2026-10-31): power on -> iOS 16.5 with GPU, touch, battery, backlight and Wi-Fi (Safari loads pages and video; join from Settings works; location by Wi-Fi positioning);
-/private/var kept between boots. Not working yet: sound (no speaker output, although the audio DSP starts), Weather data, Maps tiles, Bluetooth, cellular, camera, Power-button power off (use five fingers held 1.5 s on the screen, or iOS's power off).
+Status (2026-11-03): power on -> iOS 16.5 with GPU, touch, battery, backlight and Wi-Fi (Safari loads pages and video; join from Settings works; location by Wi-Fi positioning);
+/private/var kept between boots. The graphics arrangement is fixed and verified: `metal=2` (apps get Metal, `backboardd`
+keeps OpenGL ES) plus a `GL=1` userland, and the panel at 120 Hz with the vsync-period fix. Still not working:
+sound (no speaker output, although the audio DSP starts), Weather data (Mescal `code=12`; the app's internal
+`localhost:5033` environment is reachable but it sends no request yet), Maps tiles (`gspe19-ssl.ls.apple.com`
+answers 403 unsigned — not a renderer fault), Bluetooth, cellular, camera, charging (the MP2650 never answers on
+I²C), and Power-button power off (use five fingers held 1.5 s on the screen, or iOS's power off).
+The measured record of all of it: [`hackios/FINDINGS-2026-11-01-03.md`](hackios/FINDINGS-2026-11-01-03.md).
 iOS does not see the flash as its storage: system and /var run from RAM; /var is saved to userdata.
 
 Replicate (WSL lab with furangelz's hackios-xnu-kernel/userland at `~/fkernel`, patches from
 `hackios/patches/` applied, `common/build.sh lemonadep` built, Mu-Silicium lemonadep FD):
 
 1. `bash hackios/build-standalone.sh` -> `out/hackios/lemonadep-standalone.img`, `system-rd.bin`.
+   For hands-free iteration over USB instead, `hackios/repack-payload.sh` + `hackios/usb-test.sh LOGNAME`
+   reuse the loader session and fetch their own logs; see
+   [`hackios/FINDINGS-2026-11-01-03.md`](hackios/FINDINGS-2026-11-01-03.md) section 7.
 2. Back up boot partitions (`backup/partitions/`). **Destroys userdata contents past 16 GiB.**
 3. Phone in TWRP: `hackios/install-standalone.ps1 -SystemImage` (writes system-rd.bin at userdata+16 GiB,
    verifies the SHA-256).

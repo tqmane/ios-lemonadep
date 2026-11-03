@@ -1,0 +1,38 @@
+# Weather and Maps: do the requests these two applications make leave the phone, and what does Apple
+# answer? Built with RC_JOBS=rc.jobs.weathermaps (userland/build.sh copies this file to /etc/rc.jobs,
+# and the launchd job com.redwood.demo runs it at boot, with its output on the console).
+#
+# Why this and not the console's silence: /dev/console DROPS LINES (userland/mkjobs.py says so in the
+# store-stack note, and net_test's own output went missing in a run whose steps demonstrably ran). So
+# "Weather never asked" cannot be concluded from an absent log line -- it has to be measured by asking
+# the same questions the applications ask, in the same order, and printing the answers.
+#
+# The order is the one a stock application goes through: address, name, reachability, then the request.
+# bag.itunes.apple.com is the control: TLS to Apple that this image is known to complete (rc.jobs.store).
+# weather-data.apple.com is what the Weather app fetches its forecast from; gspe19-ssl.ls.apple.com is
+# one of the tile servers GeoServices asks for map tiles. An answer of 200 with data means the network
+# and TLS are fine and the gap is in what the app does with it; a 4xx/5xx, or a "x-" header saying the
+# request was rejected, means Apple refused it -- which is where signing would show up.
+
+/bin/echo "=== WM: weather and maps, measured ==="
+/redwood/bin/net_test waitaddr en0 60
+/redwood/bin/net_test show
+
+/bin/echo "=== WM: names ==="
+/redwood/bin/net_test resolve weather-data.apple.com
+/redwood/bin/net_test resolve gspe19-ssl.ls.apple.com
+
+/bin/echo "=== WM: reachability, what an app asks before it tries ==="
+/redwood/bin/net_test reach weather-data.apple.com
+/redwood/bin/net_test reach gspe19-ssl.ls.apple.com
+
+/bin/echo "=== WM: control, TLS to Apple that is known to work ==="
+/redwood/bin/net_test fetch https://bag.itunes.apple.com/bag.xml
+
+/bin/echo "=== WM: weather data ==="
+/redwood/bin/net_test fetch https://weather-data.apple.com/v3/weather/en_US/45.25/19.84
+
+/bin/echo "=== WM: maps tile server ==="
+/redwood/bin/net_test fetch https://gspe19-ssl.ls.apple.com/
+
+/bin/echo "=== WM: done ==="

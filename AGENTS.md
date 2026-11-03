@@ -1,5 +1,17 @@
 # Working on ios-sweet
 
+- For the lemonadep / HackiOS work, read
+  `lemonadep/hackios/FINDINGS-2026-11-01-03.md` first: it is the consolidated record of
+  the last 48 hours (GPU/GL split, 120 Hz, Weather, Maps, charging, kernel build) and
+  it marks which older claims are stale. `lemonadep/HANDOFF.md` is the recipe.
+- Device tests are hands-free and never flash: `lemonadep/hackios/repack-payload.sh`
+  repacks `run-payload.bin` from the current `root.apfs`, and
+  `lemonadep/hackios/usb-test.sh LOGNAME [SECS]` reuses the loader session, stages,
+  runs and fetches its own logs. Do not ask the user to watch the screen or press
+  buttons; `kern.bootargs`/`loader_return_after` bound every run.
+- Do not pass `USERLAND_VARS=...` to `userland/build.sh` directly — that variable belongs
+  to the upstream `common/build.sh` wrapper. Export `GL=1 ADSP=1 ...` yourself, or the
+  image silently loses Mesa (a ~18.6 MB `root.apfs` instead of ~25 MB).
 - Read `NOTES.md` before starting; it contains the project goal, hardware facts,
   current blocker, local artifact locations and the next concrete action.
 - The user switches agents frequently. Update the active handoff in `NOTES.md`

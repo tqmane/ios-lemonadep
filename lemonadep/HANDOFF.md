@@ -9,7 +9,7 @@ found is in [HANDOFF-log.md](HANDOFF-log.md); this page is the state and the rec
 | Works | Notes |
 |---|---|
 | Boot without a PC | boot_b = UEFI + xnuloader + kernel + root.apfs; the 2.4 GB system image read from userdata at 16 GiB (`diskrd`) |
-| GPU (Adreno 660, Mesa GL), touch, battery, backlight | furangelz's drivers + lemonadep patches |
+| GPU (Adreno 660, Mesa GL), touch, battery, backlight | furangelz's drivers + lemonadep patches. `metal=2` is the working split (apps get Metal, backboardd keeps OpenGL ES); the image must be built with `GL=1` (root.apfs ~25 MB, not ~18.6 MB). Panel at 120 Hz with the vsync-period fix + `fb_hz=120` |
 | /private/var kept between boots | var_store in userdata from 20 GiB; saved every 30 min, on iOS power off, on a five-finger hold (which powers off) |
 | Wi-Fi (QCA6490 / ath11k over PCIe) | joins `fw-wlan/network` at boot; configd's own Wi-Fi service and DHCP; status bar/Settings show it; join from Settings works |
 | Safari (pages, video) | needs apsd left out (see below) |
@@ -20,8 +20,8 @@ found is in [HANDOFF-log.md](HANDOFF-log.md); this page is the state and the rec
 | Not working | Cause (as far as known) |
 |---|---|
 | Sound (speaker, Safari, system sounds) | user, 2026-10-31: nothing heard although adsp=1 starts the audio DSP; speaker amplifier/route on this phone not brought up -- next candidate (furangelz's redwood audio is for another codec/amp) |
-| Weather numbers | WeatherKit requests are FairPlay-signed; fairplayd exits at once on this port (unsolved upstream too) |
-| Maps tiles | not investigated; signing and/or VectorKit Metal (Metal for apps unfinished) |
+| Weather numbers | WeatherKit requests are Mescal/FairPlay-signed (`code=12`, "Failed to fetch hardware info"), and an unsigned request answers 401. WeatherCore's internal "Local - Mock Server" environment (`http://localhost:5033`, keys `weather.environment.contentEnvironment/localServerURL/localServerPort`) is now reachable from an injected library, but as of 2026-11-03 the app sends no request at all — see hackios/FINDINGS-2026-11-01-03.md §4 |
+| Maps tiles | **not** Metal and not the renderer: Maps draws its own UI and `gspe19-ssl.ls.apple.com` answers **403, 0 bytes** to unsigned tile requests (control `bag.xml` 200 in the same session). Needs a different tile source behind GeoServices |
 | Bluetooth, cellular, camera | not started |
 | Power button shutdown | does not save /var; use the five-finger hold or iOS's power off |
 | Location toggle in Settings | not shown (MobileGestalt: no GPS?); the switch is forced on instead |
@@ -61,6 +61,13 @@ userland-0001 also touches `ios165/select-system.py`). Kernel driver: `hackios/k
 
 Dev runs (logs over USB): `fastboot boot out/hackios/lemonadep-boot.img`, then `hackios/run-live.ps1`
 (`-Resident` reuses the system image the loader holds). Fastboot needs the buttons (Power + Volume Down).
+
+## Where the last two days are written down
+
+`hackios/FINDINGS-2026-11-01-03.md` is the consolidated record of 2026-11-01..03: the metal/GL split and why
+`metal=3` fails, the 120 Hz measurements (3220 vs 3060 frames — no measured gain, the counters measure app
+redraw), Weather's Mescal chain and its local-server key discovery, the Maps 403, the MP2650 charger, the
+kernel link-time break and the hands-free USB test loop. Read it before repeating any experiment.
 
 ## Debugging tools that paid off
 
