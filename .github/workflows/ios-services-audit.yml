@@ -1,0 +1,26 @@
+name: ios-services-audit
+
+on:
+  pull_request:
+    paths:
+      - "tools/ios-service-audit.py"
+      - "tools/tests/test_ios_service_audit.py"
+      - ".github/workflows/ios-services-audit.yml"
+  push:
+    branches: [main, "feat/appstore-readiness"]
+    paths:
+      - "tools/ios-service-audit.py"
+      - "tools/tests/test_ios_service_audit.py"
+      - ".github/workflows/ios-services-audit.yml"
+
+jobs:
+  audit-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static Python syntax check
+        run: python3 -m py_compile tools/ios-service-audit.py tools/tests/test_ios_service_audit.py
+      - name: Offline synthetic fixture tests
+        run: python3 -m unittest discover -s tools/tests -p 'test_ios_service_audit.py' -v
